@@ -1,0 +1,266 @@
+/**
+ * 基于jquery ajax定义最原始通信类，它默认提供了GET, POST, DELETE, PUT(可以自定义)
+ * 默认支持JSON格式的媒体类型
+ *
+ * 所有方法返回的是支持promise接口的对象（见：http://api.jquery.com/jQuery.ajax/）
+ * """
+ * The jqXHR objects returned by $.ajax() as of jQuery 1.5 implement the Promise interface, giving them all the properties, methods, and behavior of a Promise (see Deferred object for more information).
+ * """
+ * REST 规范参考：
+ *
+ */
+define("app/services/http-service", [], function () {
+
+    /**
+     * 终止正在进行的xhr请求
+     */
+    var abortAjax = function (xhr) {
+        try {
+            xhr.onreadystatechange = null;
+            xhr.abort();
+        } catch (e) {
+            console.log(e);
+        }
+    };
+
+    var defineExcept = new window.dataExcept();
+
+    var TIME_OUT = 60 * 1000;
+
+    var service = function ($rootScope, mask, $q, cookieService, restService) {
+        var ABNORMAL_SESSION = {
+            NO_SESSION: "-401",
+            NO_AUTHENTICATION: "1077949069"
+        };
+        // 根据用户配置项创建Ajax请求
+        var getRequest = function (method, config) {
+            // 格式化POST、PUT、DELETE的参数部分
+            if (method === 'POST' || method === 'PUT' || method === 'DELETE') {
+                if (angular.isObject(config.data)) {
+                    var data = config.data;
+                    config.data = JSON.stringify(data);
+                }
+            }
+
+            var checkFn = config.checkFn;
+
+            var defaultConfig = {
+                "type": method,
+                "timeout": TIME_OUT,
+                "contentType": "application/json; charset=UTF-8",
+                "headers": {
+                    "Accept-Language": window.getLanguageFromCookie(),
+                    "iBaseToken": cookieService.getIBaseToken() || window.iBaseToken
+                }
+            };
+
+            var deferred = $q.defer();
+            var eventList = {
+                "beforeSend": function (request, setting) {
+                    // 表示是否支持忙等
+                    if (config.mask) {
+                        /*
+                            1、mask: true 表示全局忙等
+                            2、mask: '#id/.class' 表示局部忙等（mask满足JQery选择器格式）
+                        */
+                        config.mask === true ? mask.show() : mask.show(config.mask);
+                    }
+                    config.beforeSend && config.beforeSend(request, setting);
+                },
+                "complete": function () {
+                    // 请求完成关闭忙等
+                    if (config.mask) {
+                        config.mask === true ? mask.hide() : mask.hide(config.mask);
+                    }
+                },
+                'success': function (response) {
+                    if (angular.isObject(response) && angular.isDefined(response.error) && angular.isDefined(response.error.code) && (String(response.error.code) === ABNORMAL_SESSION.NO_AUTHENTICATION || String(response.error.code) ===  ABNORMAL_SESSION.NO_SESSION)) {
+                        if (!(cookieService.getIBaseToken() === '' || cookieService.getDeviceId() === 'xxxxx')) {
+                            $rootScope.$broadcast("sessionTimeoutEvent", {});
+                        }
+                    }
+                    defineExcept.checkData(response,finalConfig,checkFn);
+                    deferred.resolve.apply(deferred, arguments);
+                },
+                'error': function () {
+                    // 不同的错误场景可以通过 textStatus 参数来判断，取值可能有：
+                    //  "timeout" 超时的错误
+                    //  "error" 跨域等网络异常的错误
+                    // "notmodified" 缓存相关，浏览器根据该取值取消请求
+                    // "parsererror" 与头文件有关的错误
+                    deferred.reject.apply(deferred, arguments);
+                }
+            };
+
+            var finalConfig = angular.extend({}, defaultConfig, config, eventList); // 要保证eventList的优先级最高，不可被覆盖
+            var $ajax = $.ajax(finalConfig);
+            return {
+                promise: deferred.promise,
+                ajax: $ajax
+            };
+        };
+
+        this.xhrPool = {};
+        /**
+         * 删除/终止正在进行的xhr请求，通过id（由用户调用该服务的get、post等http方法时传入）来确定某个具体的xhr
+         * @param xhrQueue {String/Array[String]/空}
+         * 当xhrQueue为String时，终止单个xhr请求
+         * 当xhrQueue为Array[String]时，终止多个xhr请求
+         * 当xhrQueue为空（不传）时，终止所有正在进行的xhr请求
+         */
+        this.abort = function (xhrQueue) {
+            // 删除/终止单个xhr请求
+            if (typeof xhrQueue === "string" && this.xhrPool[xhrQueue]) {
+                abortAjax(this.xhrPool[xhrQueue]);
+                return;
+            }
+            // 删除/终止多个xhr请求
+            if ($.isArray(xhrQueue)) {
+                var xhrId,
+                    xhrIndex = 0,
+                    xhrLength = xhrQueue.length;
+                for (; xhrIndex < xhrLength; xhrIndex++) {
+                    xhrId = xhrQueue[xhrIndex];
+                    if (typeof xhrId === "string" && this.xhrPool[xhrId]) {
+                        abortAjax(this.xhrPool[xhrId]);
+                    }
+                }
+                return;
+            }
+            // 参数为空时,删除/终止所有正在进行的xhr请求
+            if (xhrQueue === undefined && !$.isEmptyObject(this.xhrPool)) {
+                $.each(this.xhrPool, function (xhrId, xhr) {
+                    abortAjax(xhr);
+                });
+                return;
+            }
+        };
+        this.get = function (config) {
+            var requestInfo = getRequest('GET', config);
+            // 将AJAX对应的xhr对象按照id:xhr的键值对形式缓存起来，方便后续对某id对应的xhr进行处理
+            if (typeof config.id === "string") {
+                this.xhrPool[config.id] = requestInfo.ajax;
+            }
+            return requestInfo.promise;
+        };
+
+        this.post = function (config) {
+            var requestInfo = getRequest('POST', config);
+            // 将AJAX对应的xhr对象按照id:xhr的键值对形式缓存起来，方便后续对某id对应的xhr进行处理
+            if (typeof config.id === "string") {
+                this.xhrPool[config.id] = requestInfo.ajax;
+            }
+            return requestInfo.promise;
+        };
+
+        this.delete = function (config) {
+            var requestInfo = getRequest('DELETE', config);
+            // 将AJAX对应的xhr对象按照id:xhr的键值对形式缓存起来，方便后续对某id对应的xhr进行处理
+            if (typeof config.id === "string") {
+                this.xhrPool[config.id] = requestInfo.ajax;
+            }
+            return requestInfo.promise;
+        };
+
+        this.put = function (config) {
+            var requestInfo = getRequest('PUT', config);
+            // 将AJAX对应的xhr对象按照id:xhr的键值对形式缓存起来，方便后续对某id对应的xhr进行处理
+            if (typeof config.id === "string") {
+                this.xhrPool[config.id] = requestInfo.ajax;
+            }
+            return requestInfo.promise;
+        };
+
+        this.patch = function (config) {
+            var requestInfo = getRequest('PATCH', config);
+            // 将AJAX对应的xhr对象按照id:xhr的键值对形式缓存起来，方便后续对某id对应的xhr进行处理
+            if (typeof config.id === "string") {
+                this.xhrPool[config.id] = requestInfo.ajax;
+            }
+            return requestInfo.promise;
+        };
+        // 组合接口
+        this.doCompositedRequest = function (configArray, config) {
+            var paraObj = {},
+                config = config || {};
+            for (var i = 0; i < configArray.length; i++) {
+                var eachConfig = configArray[i];
+                paraObj[eachConfig.id] = {
+                    method: eachConfig.config.method,
+                    url: eachConfig.config.url,
+                    para: eachConfig.config.data
+                };
+            }
+            return this.post({
+                id: config.id,
+                url: restService.getRESTUrl('compositeinfo'),
+                data: paraObj,
+                mask: config.mask
+            })
+        };
+
+
+        //大数据量的组合接口拆分，后台限制了单个组合接口最多包含16条rest接口
+        var MAX_COMPOSITED_REQUEST_LENGTH = 16;
+        this.doCompositedRequestChunk = function (configArray, compositeID) {
+            var paraObj = {};
+            var chunkedConfigArray = chunk(configArray, MAX_COMPOSITED_REQUEST_LENGTH);//按长度16拆分出多个数组
+            var promiseArr = [];
+            var dfd = $q.defer();
+
+            _.each(chunkedConfigArray, function (array, index) {
+                paraObj = {};
+                for (var i = 0; i < array.length; i++) {
+                    var eachConfig = array[i];
+                    paraObj[eachConfig.id] = {
+                        method: eachConfig.config.method,
+                        url: eachConfig.config.url,
+                        para: eachConfig.config.data
+                    };
+                }
+                promiseArr.push(this.post({
+                    id: compositeID + index,
+                    url: restService.getRESTUrl('compositeinfo'),
+                    data: paraObj
+                }))
+            }, this)
+
+            $q.all(promiseArr).then(function (resultArr) {
+                var dataArr = {};
+                _.each(resultArr, function (result) {
+                    if (result.error.code === 0) {
+                        dataArr = angular.extend(dataArr, result.data);
+                    }
+                }, this)
+                dfd.resolve({
+                    data: dataArr,
+                    error: {
+                        code: 0,
+                        description: "0"
+                    }
+                });
+            }, function (result) {
+                dfd.reject(result);
+            });
+
+            return dfd.promise;
+
+            //数组按固定长度拆分，不传size默认为2
+            function chunk(collection, size) {
+                var result = [];
+                // default size to two item
+                size = parseInt(size, 10) || 2;
+                // add each chunk to the result
+                for (var x = 0; x < Math.ceil(collection.length / size); x++) {
+                    var start = x * size;
+                    var end = start + size;
+                    result.push(collection.slice(start, end));
+                }
+                return result;
+            }
+        };
+    };
+
+    service.$inject = ["$rootScope", "mask", "$q", "cookieService", "restService"];
+    return service;
+});
